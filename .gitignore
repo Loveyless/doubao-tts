@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# 敏感文件
+.cookie
+
+# 生成的音频文件
+*.aac
+*.mp3
+*.wav
+
+# IDE
+.idea/
+.vscode/
+*.swp
