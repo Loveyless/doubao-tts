@@ -5,8 +5,54 @@
 ## 安装
 
 ```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+## ⚠️ 配置 Cookie（必须）
+
+本工具需要豆包登录态 Cookie 才能使用。
+
+### 获取 Cookie
+
+1. 打开浏览器访问 [豆包](https://www.doubao.com) 并**登录账号**
+2. 按 `F12` 打开开发者工具
+3. 切换到 **Application** 标签页
+4. 左侧展开 **Cookies** → 点击 `https://www.doubao.com`
+5. 找到以下**三个必需字段**并复制其值：
+
+| Cookie 名称 | 说明 |
+|-------------|------|
+| `sessionid` | 登录会话 ID |
+| `sid_guard` | 会话守护令牌 |
+| `uid_tt` | 用户唯一标识 |
+
+![Cookie 位置示意](https://img.shields.io/badge/Application-Cookies-blue)
+
+### 配置 Cookie
+
+**方式一：命令行保存（推荐）**
+
+```bash
+python doubao_tts.py "测试" --cookie "sessionid=xxx; sid_guard=xxx; uid_tt=xxx" --save-cookie
+```
+
+Cookie 将保存到 `.cookie` 文件，后续使用无需再次提供。
+
+**方式二：手动创建配置文件**
+
+在项目目录下创建 `.cookie` 文件：
+
+```bash
+echo "sessionid=你的sessionid; sid_guard=你的sid_guard; uid_tt=你的uid_tt" > .cookie
+```
+
+### Cookie 有效期
+
+- Cookie 有效期约 **30 天**
+- 过期后需重新登录豆包并获取新的 Cookie
+- 如果出现连接失败，请先检查 Cookie 是否过期
 
 ## 快速使用
 
