@@ -32,17 +32,31 @@ pip install -r requirements.txt
 
 ### 配置 Cookie
 
-**方式一：命令行保存（推荐）**
+**方式一：命令行保存为 JSON（推荐）**
 
 ```bash
 python doubao_tts.py "测试" --cookie "sessionid=xxx; sid_guard=xxx; uid_tt=xxx" --save-cookie
 ```
 
-Cookie 将保存到 `.cookie` 文件，后续使用无需再次提供。
+Cookie 将保存到 `.cookie.json` 文件，后续使用无需再次提供。
 
-**方式二：手动创建配置文件**
+**方式二：手动创建 JSON 配置文件**
 
-在项目目录下创建 `.cookie` 文件：
+在项目目录下创建 `.cookie.json` 文件：
+
+```json
+{
+  "cookie": {
+    "sessionid": "你的sessionid",
+    "sid_guard": "你的sid_guard",
+    "uid_tt": "你的uid_tt"
+  }
+}
+```
+
+**方式三：兼容旧版 `.cookie`**
+
+旧版纯文本 `.cookie` 仍然支持，内容格式不变：
 
 ```bash
 echo "sessionid=你的sessionid; sid_guard=你的sid_guard; uid_tt=你的uid_tt" > .cookie
@@ -52,7 +66,7 @@ echo "sessionid=你的sessionid; sid_guard=你的sid_guard; uid_tt=你的uid_tt"
 
 - Cookie 有效期约 **30 天**
 - 过期后需重新登录豆包并获取新的 Cookie
-- 如果出现连接失败，请先检查 Cookie 是否过期
+- 如果出现 `HTTP 200` 握手失败，请优先检查 Cookie 是否过期、缺字段，或仍在使用占位符
 
 ## 快速使用
 
@@ -68,9 +82,22 @@ python doubao_tts.py "欢迎使用豆包" -s yangguang -o welcome.aac
 # 调整语速和音调
 python doubao_tts.py "快速朗读测试" --speed 0.5 --pitch 0.2 -o fast.aac
 
+# 命中 block 时显式开启退避重试（默认关闭）
+python doubao_tts.py "需要重试的文本" --retry-on-block --retry-max-retries 2 --retry-backoff-seconds 1.5
+
+# 在退避上增加可选随机抖动（这里表示上下浮动 20%）
+python doubao_tts.py "需要重试的文本" --retry-on-block --retry-max-retries 2 --retry-backoff-seconds 1.5 --retry-backoff-jitter-ratio 0.2
+
 # 查看可用语音
 python doubao_tts.py --list-speakers ""
 ```
+
+说明：
+
+- 对外兼容入口仍然是 `doubao_tts.py`
+- 实际 CLI 逻辑已拆到 `doubao_tts_cli.py`
+- 库逻辑保留在 `doubao_tts.py`，避免命令行参数解析继续污染库代码
+- `block` 退避重试默认关闭，只有显式传入 `--retry-on-block` 才会启用
 
 ### Python API
 
@@ -78,18 +105,28 @@ python doubao_tts.py --list-speakers ""
 from doubao_tts import DoubaoTTS, TTSConfig, SPEAKERS
 
 # 方式1: 简单使用
+# 默认会读取项目目录下的 .cookie.json / .cookie
 tts = DoubaoTTS()
 result = tts.synthesize_sync("你好，世界")
 if result.success:
     with open("output.aac", "wb") as f:
         f.write(result.audio_data)
+    print(result.event_order)        # 例如: ["open_success", "sentence_start", "sentence_end", "finish"]
+    print(result.audio_chunk_count)  # 实际收到的二进制音频块数量
+    print(result.json_messages[-1])  # 最后一条 JSON 响应，排查错误时很有用
 
 # 方式2: 自定义配置
 config = TTSConfig(
     speaker="zh_male_yangguang_conversation_v4_wvae_bigtts",
     speech_rate=0.2,  # 稍快
     pitch=0,
-    format="aac"
+    format="aac",
+    verbose=True,  # 输出底层连接日志
+    retry_on_block=True,  # 显式开启 block 退避重试
+    retry_max_retries=2,
+    retry_backoff_seconds=1.5,
+    retry_backoff_multiplier=2.0,
+    retry_backoff_jitter_ratio=0.2,  # 可选抖动比例，上下浮动 20%
 )
 tts = DoubaoTTS(config)
 result = tts.synthesize_sync("自定义语音测试")
@@ -111,6 +148,15 @@ async def main():
 
 asyncio.run(main())
 ```
+
+说明：
+
+- `DoubaoTTS()` 会自动尝试读取本地 `.cookie.json`，其次回退到旧版 `.cookie`
+- 如果你在 Jupyter、FastAPI、异步框架里使用，请直接 `await tts.synthesize(...)`，不要调用 `synthesize_sync()`
+- `TTSResult` 会返回事件序列、原始 JSON 响应、音频块数、是否收到 `finish`、关闭码等协议元数据，便于排错
+- `block` 退避重试默认关闭；启用后只对 `error_code=710022002` 或错误文本为 `block` 的结果生效
+- `retry_max_retries` 表示额外重试次数，不包含首轮请求
+- `retry_backoff_jitter_ratio` 是可选抖动比例，`0.2` 表示基准退避时间上下浮动 20%，默认 `0.0` 关闭
 
 ### 流式播放
 
@@ -139,6 +185,26 @@ async def stream_play():
 asyncio.run(stream_play())
 ```
 
+## 协议观测脚本
+
+如果你要记录一次真实请求的原始返回，不要再手写临时命令，直接用：
+
+```bash
+python scripts/observe_session.py "日志观察文本"
+```
+
+默认输出：
+
+- 日志文件：`logs/session_observation.log`
+- 音频文件：`logs/session_observation.aac`
+
+可选参数：
+
+- `--speaker`：切换语音角色
+- `--format`：切换输出格式
+- `--output-dir`：指定日志目录
+- `--cookie`：临时覆盖本地配置
+
 ## 可用语音角色
 
 | 简称 | 完整 ID | 描述 |
@@ -154,6 +220,8 @@ asyncio.run(stream_play())
 | en_male | en_male_adam_conversation_bigtts | 英文男声 |
 
 ## 协议说明
+
+补充的真实调用观察记录见 `docs/protocol_observation.md`。
 
 ### WebSocket 端点
 ```
@@ -183,6 +251,7 @@ wss://ws-samantha.doubao.com/samantha/audio/tts
 {"event": "sentence_start", "sentence_start_result": {"readable_text": "..."}}
 [Binary AAC/MP3 数据]
 {"event": "sentence_end", "code": 0, "message": ""}
+{"event": "finish", "code": 0, "message": ""}
 ```
 
 ## 注意事项

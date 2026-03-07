@@ -7,6 +7,7 @@ venv/
 
 # 敏感文件
 .cookie
+.cookie.json
 
 # 生成的音频文件
 *.aac
@@ -17,3 +18,4 @@ venv/
 .idea/
 .vscode/
 *.swp
+logs/

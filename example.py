@@ -17,9 +17,9 @@ async def example_basic():
     
     if result.success:
         Path("example_basic.aac").write_bytes(result.audio_data)
-        print(f"✅ 保存成功: example_basic.aac ({len(result.audio_data):,} bytes)")
+        print(f"[OK] 保存成功: example_basic.aac ({len(result.audio_data):,} bytes)")
     else:
-        print(f"❌ 失败: {result.error}")
+        print(f"[ERROR] 失败: {result.error}")
 
 
 async def example_different_speakers():
@@ -36,7 +36,7 @@ async def example_different_speakers():
         if result.success:
             filename = f"example_{name}.aac"
             Path(filename).write_bytes(result.audio_data)
-            print(f"✅ {name}: {filename}")
+            print(f"[OK] {name}: {filename}")
 
 
 async def example_speed_pitch():
@@ -61,7 +61,7 @@ async def example_speed_pitch():
         if result.success:
             filename = f"example_{name}.aac"
             Path(filename).write_bytes(result.audio_data)
-            print(f"✅ {name} (speed={speed}, pitch={pitch}): {filename}")
+            print(f"[OK] {name} (speed={speed}, pitch={pitch}): {filename}")
 
 
 async def example_streaming():
@@ -79,7 +79,7 @@ async def example_streaming():
         total_bytes += len(data)
     
     def on_sentence(text: str):
-        print(f"  📢 朗读: {text[:30]}...")
+        print(f"  [SAY] 朗读: {text[:30]}...")
     
     long_text = """
     人工智能正在改变我们的生活方式。
@@ -94,7 +94,7 @@ async def example_streaming():
     )
     
     if result.success:
-        print(f"✅ 流式处理完成:")
+        print(f"[OK] 流式处理完成:")
         print(f"   - 音频块数: {chunk_count}")
         print(f"   - 总字节数: {total_bytes:,}")
         print(f"   - 句子数: {len(result.sentences)}")
@@ -116,12 +116,12 @@ async def example_english():
     
     if result.success:
         Path("example_english.aac").write_bytes(result.audio_data)
-        print(f"✅ 保存成功: example_english.aac")
+        print(f"[OK] 保存成功: example_english.aac")
 
 
 async def main():
     """运行所有示例"""
-    print("🎤 豆包 TTS 示例程序")
+    print("[INFO] 豆包 TTS 示例程序")
     print("=" * 50)
     
     await example_basic()
@@ -131,7 +131,7 @@ async def main():
     await example_english()
     
     print("\n" + "=" * 50)
-    print("✨ 所有示例完成!")
+    print("[OK] 所有示例完成!")
     print("   生成的音频文件可以用任意播放器打开")
 
 
