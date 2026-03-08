@@ -205,6 +205,157 @@ python scripts/observe_session.py "日志观察文本"
 - `--output-dir`：指定日志目录
 - `--cookie`：临时覆盖本地配置
 
+## HTTP 服务模式
+
+如果你要把当前仓库作为独立服务给其他应用调用，不要复用 CLI 流程，直接启动 HTTP 服务。
+
+### 环境变量
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `TTS_COOKIE` | 是 | 无 | 豆包登录态 Cookie，服务模式下必须显式提供 |
+| `TTS_DEFAULT_SPEAKER` | 否 | `taozi` | 默认 speaker 简称或完整 ID |
+| `TTS_DEFAULT_FORMAT` | 否 | `aac` | 默认音频格式，当前仅支持 `aac`、`mp3` |
+| `TTS_HOST` | 否 | `127.0.0.1` | 服务监听地址 |
+| `TTS_PORT` | 否 | `8080` | 服务监听端口 |
+| `TTS_LOG_LEVEL` | 否 | `INFO` | 服务日志级别 |
+| `TTS_RETRY_ON_BLOCK` | 否 | `false` | 是否在命中 block 时执行退避重试 |
+| `TTS_RETRY_MAX_RETRIES` | 否 | `0` | block 最大额外重试次数 |
+| `TTS_RETRY_BACKOFF_SECONDS` | 否 | `1.0` | block 首次退避秒数 |
+| `TTS_RETRY_BACKOFF_MULTIPLIER` | 否 | `2.0` | block 退避倍率 |
+| `TTS_RETRY_BACKOFF_JITTER_RATIO` | 否 | `0.0` | block 退避抖动比例 |
+| `TTS_REQUEST_TIMEOUT_SECONDS` | 否 | `35.0` | 单次 HTTP 请求的服务侧超时 |
+| `TTS_MAX_CONCURRENCY` | 否 | `4` | 服务级并发上限 |
+| `TTS_AUTH_TOKEN` | 否 | 空 | 若配置则要求 `Authorization: Bearer <token>` |
+| `TTS_ENABLE_METRICS` | 否 | `true` | 是否启用 `/metrics` |
+
+### 本地启动
+
+PowerShell：
+
+```powershell
+$env:TTS_COOKIE = "sessionid=...; sid_guard=...; uid_tt=..."
+$env:TTS_LOG_LEVEL = "INFO"
+python -m service
+```
+
+或直接使用 `uvicorn`：
+
+```bash
+python -m uvicorn service.app:app --host 127.0.0.1 --port 8080
+```
+
+### 基础接口
+
+#### 健康检查
+
+```bash
+curl http://127.0.0.1:8080/healthz
+```
+
+#### 获取 speaker 列表
+
+```bash
+curl http://127.0.0.1:8080/v1/speakers
+```
+
+#### 获取音频二进制
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/tts \
+  -H "Content-Type: application/json" \
+  -d '{"text":"你好，欢迎使用服务模式","speaker":"taozi","format":"aac","speed":0,"pitch":0}' \
+  --output output.aac
+```
+
+#### 流式返回音频
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/tts/stream \
+  -H "Content-Type: application/json" \
+  -d '{"text":"这是一段用于流式输出的文本","speaker":"taozi","format":"aac"}' \
+  --output stream_output.aac
+```
+
+#### 开启简单鉴权
+
+```powershell
+$env:TTS_AUTH_TOKEN = "change-me"
+python -m service
+```
+
+调用时带上 Bearer Token：
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/tts \
+  -H "Authorization: Bearer change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"鉴权测试","format":"aac"}' \
+  --output auth_output.aac
+```
+
+#### 查看指标
+
+```bash
+curl http://127.0.0.1:8080/metrics
+```
+
+如果配置了 `TTS_AUTH_TOKEN`，`/metrics` 也需要携带 `Authorization: Bearer <token>`，否则返回 `401`；如果 `TTS_ENABLE_METRICS=false`，则返回 `503`。
+
+当前提供的指标包括：总请求数、成功数、失败数、超时数、上游失败数、未授权请求数、流式请求数、当前 in-flight 数。
+
+### 服务器部署
+
+最小建议：Linux 服务器上使用虚拟环境 + `systemd` 托管，不要直接把开发命令扔进 shell 后台跑。
+
+`/etc/systemd/system/doubao-tts.service` 示例：
+
+```ini
+[Unit]
+Description=Doubao TTS Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/doubao-tts
+Environment="TTS_COOKIE=sessionid=...; sid_guard=...; uid_tt=..."
+Environment="TTS_HOST=0.0.0.0"
+Environment="TTS_PORT=8080"
+ExecStart=/opt/doubao-tts/.venv/bin/python -m service
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用方式：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now doubao-tts
+sudo systemctl status doubao-tts
+```
+
+### Docker 部署
+
+构建镜像：
+
+```bash
+docker build -t doubao-tts:latest .
+```
+
+运行容器：
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e TTS_COOKIE='sessionid=...; sid_guard=...; uid_tt=...' \
+  -e TTS_HOST=0.0.0.0 \
+  doubao-tts:latest
+```
+
+如果你要在反向代理后长期运行，再补 HTTPS、访问控制和进程级监控；不要把裸服务直接暴露到公网。
+
 ## 可用语音角色
 
 | 简称 | 完整 ID | 描述 |
