@@ -65,6 +65,13 @@ class CookieConfigTests(unittest.TestCase):
             client = doubao_tts.DoubaoTTS(doubao_tts.TTSConfig())
         self.assertEqual(client.config.cookie, VALID_COOKIE)
 
+    def test_client_can_disable_cookie_auto_load(self):
+        with patch.object(doubao_tts, "load_cookie_from_file", return_value=VALID_COOKIE) as load_cookie:
+            client = doubao_tts.DoubaoTTS(doubao_tts.TTSConfig(cookie="", autoload_cookie=False))
+
+        self.assertEqual(client.config.cookie, "")
+        load_cookie.assert_not_called()
+
     def test_build_headers_normalizes_cookie(self):
         scrambled_cookie = "uid_tt=test-uid; sessionid=test-session; sid_guard=test-guard"
         client = doubao_tts.DoubaoTTS(doubao_tts.TTSConfig(cookie=scrambled_cookie))

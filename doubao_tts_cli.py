@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import logging
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -63,6 +64,8 @@ def print_cookie_help(api=None):
 async def run_async(args, api=None) -> int:
     api = get_api(api)
 
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
     if args.list_speakers:
         print_speakers(api)
         return 0
@@ -71,7 +74,9 @@ async def run_async(args, api=None) -> int:
 
     if args.save_cookie and args.cookie:
         if not api.save_cookie_to_file(args.cookie):
+            print("[ERROR] 保存 Cookie 失败")
             return 1
+        print(f"[OK] Cookie 已保存到: {api.COOKIE_CONFIG_FILE}")
 
     if not cookie:
         print_cookie_help(api)

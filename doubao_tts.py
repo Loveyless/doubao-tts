@@ -10,6 +10,7 @@ Doubao TTS Reverse Engineering Client
 
 import asyncio
 import json
+import logging
 import uuid
 import random
 from urllib.parse import urlencode
@@ -20,9 +21,18 @@ from dataclasses import dataclass, field
 try:
     import websockets
     from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
-except ImportError:
-    print("请安装 websockets: pip install websockets")
-    exit(1)
+except ImportError as exc:
+    raise RuntimeError("请安装 websockets: pip install websockets") from exc
+
+
+LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.NullHandler())
+
+LOG_LEVEL_MAP = {
+    "INFO": logging.INFO,
+    "WARN": logging.WARNING,
+    "ERROR": logging.ERROR,
+}
 
 
 @dataclass
@@ -45,6 +55,8 @@ class TTSConfig:
     pc_version: str = "2.46.3"
     # Cookie (从浏览器获取)
     cookie: str = ""
+    # Whether to auto-load Cookie from local config during init
+    autoload_cookie: bool = True
     # 是否输出运行日志
     verbose: bool = False
     # 是否在命中 block 时执行退避重试，默认关闭
@@ -122,7 +134,7 @@ class DoubaoTTS:
     
     def __init__(self, config: Optional[TTSConfig] = None):
         self.config = config or TTSConfig()
-        if not self.config.cookie:
+        if not self.config.cookie and self.config.autoload_cookie:
             self.config.cookie = load_cookie_from_file()
         self._device_id = self._generate_device_id()
         self._web_id = self._generate_web_id()
@@ -188,7 +200,7 @@ class DoubaoTTS:
     def _log(self, level: str, message: str):
         """按需输出日志，避免库层污染标准输出"""
         if self.config.verbose:
-            print(f"[{level}] {message}")
+            LOGGER.log(LOG_LEVEL_MAP.get(level, logging.INFO), message)
 
     def _validate_retry_config(self):
         """校验显式启用的重试配置，避免配置错误导致无脑重试"""
@@ -492,12 +504,12 @@ def load_cookie_from_file() -> str:
         try:
             config = json.loads(COOKIE_CONFIG_FILE.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
-            print(f"[ERROR] JSON 配置解析失败: {e}")
+            LOGGER.error("JSON 配置解析失败: %s", e)
             return ""
 
         cookie_config = config.get("cookie", config)
         if not isinstance(cookie_config, dict):
-            print(f"[ERROR] JSON 配置格式错误: {COOKIE_CONFIG_FILE} 中的 cookie 必须是对象")
+            LOGGER.error("JSON 配置格式错误: %s 中的 cookie 必须是对象", COOKIE_CONFIG_FILE)
             return ""
 
         missing_fields = [
@@ -505,7 +517,7 @@ def load_cookie_from_file() -> str:
             if is_missing_cookie_value(cookie_config.get(field, ""))
         ]
         if missing_fields:
-            print(f"[ERROR] JSON 配置缺少必需字段: {', '.join(missing_fields)}")
+            LOGGER.error("JSON 配置缺少必需字段: %s", ", ".join(missing_fields))
             return ""
 
         normalized_cookie = {
@@ -550,7 +562,7 @@ def save_cookie_to_file(cookie: str) -> bool:
     """保存 cookie 到 JSON 配置文件"""
     normalized_cookie, missing_fields = normalize_cookie(cookie)
     if missing_fields:
-        print(f"[ERROR] Cookie 缺少必需字段: {', '.join(missing_fields)}")
+        LOGGER.error("Cookie 缺少必需字段: %s", ", ".join(missing_fields))
         return False
 
     cookie_items = parse_cookie_string(normalized_cookie)
@@ -564,7 +576,7 @@ def save_cookie_to_file(cookie: str) -> bool:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"[OK] Cookie 已保存到: {COOKIE_CONFIG_FILE}")
+    LOGGER.info("Cookie 已保存到: %s", COOKIE_CONFIG_FILE)
     return True
 
 
