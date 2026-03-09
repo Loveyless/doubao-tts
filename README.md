@@ -213,7 +213,7 @@ python scripts/observe_session.py "日志观察文本"
 
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
-| `TTS_COOKIE` | 是 | 无 | 豆包登录态 Cookie，服务模式下必须显式提供 |
+| `TTS_COOKIE` | 否 | 空 | 首次部署时可用它自动种入第一组豆包凭据；若 SQLite 已有凭据，可不再依赖它 |
 | `TTS_DEFAULT_SPEAKER` | 否 | `taozi` | 默认 speaker 简称或完整 ID |
 | `TTS_DEFAULT_FORMAT` | 否 | `aac` | 默认音频格式，当前仅支持 `aac`、`mp3` |
 | `TTS_HOST` | 否 | `127.0.0.1` | 服务监听地址 |
@@ -226,8 +226,13 @@ python scripts/observe_session.py "日志观察文本"
 | `TTS_RETRY_BACKOFF_JITTER_RATIO` | 否 | `0.0` | block 退避抖动比例 |
 | `TTS_REQUEST_TIMEOUT_SECONDS` | 否 | `35.0` | 单次 HTTP 请求的服务侧超时 |
 | `TTS_MAX_CONCURRENCY` | 否 | `4` | 服务级并发上限 |
-| `TTS_AUTH_TOKEN` | 否 | 空 | 若配置则要求 `Authorization: Bearer <token>` |
+| `TTS_AUTH_TOKEN` | 否 | 空 | 已废弃；当前版本不再校验它 |
 | `TTS_ENABLE_METRICS` | 否 | `true` | 是否启用 `/metrics` |
+| `TTS_SQLITE_PATH` | 否 | 用户目录下的 `.doubao-tts/tts_service.db` | 管理后台和后续报表使用的 SQLite 文件路径 |
+| `TTS_SQLITE_JOURNAL_MODE` | 否 | `WAL` | SQLite journal mode；测试或 Windows 兼容场景可改为 `DELETE` |
+| `TTS_SESSION_SECRET` | 否 | 空 | 管理后台 session 签名密钥；要启用后台登录就必须配置 |
+| `TTS_ADMIN_BOOTSTRAP_PASSWORD` | 否 | 空 | 管理后台首次初始化使用的引导密码；不应长期当正式管理密码 |
+| `TTS_SECURE_COOKIES` | 否 | 自动判断 | 强制后台 session / CSRF cookie 使用 `Secure` 标志 |
 
 ### 本地启动
 
@@ -245,6 +250,41 @@ python -m service
 python -m uvicorn service.app:app --host 127.0.0.1 --port 8080
 ```
 
+### 管理后台
+
+当前已经落地的是完整的二期后台基础面，不再只是登录壳子。已提供：
+
+- `/admin/setup`：首次初始化正式管理密码
+- `/admin/login`：后台登录
+- `/admin`：总览页
+- `/admin/settings`：服务参数设置页
+- `/admin/accounts`：豆包凭据池管理页
+- `/admin/api-keys`：API Key 创建与启停页
+- `/admin/reports`：调用报表页
+- `/admin/test-tts`：受控测试合成页
+
+启动后台前至少补这两个环境变量：
+
+```powershell
+$env:TTS_SESSION_SECRET = "replace-with-a-long-random-secret"
+$env:TTS_ADMIN_BOOTSTRAP_PASSWORD = "bootstrap-only-password"
+python -m service
+```
+
+然后访问：
+
+```text
+http://127.0.0.1:8080/admin/setup
+```
+
+说明：
+
+- bootstrap 密码只用于首次初始化，不该长期当正式管理密码用。
+- 管理后台密码和公开接口凭据不是一回事，别混着用。
+- `TTS_DEFAULT_*`、超时、并发、重试等参数第一次会按环境变量种进 SQLite，之后应通过 `/admin/settings` 管理，不要再指望改 env 热更新。
+- `TTS_COOKIE` 也只适合当首次种子；后续凭据管理应在 `/admin/accounts` 完成。
+- `/metrics` 现在只认后台登录态，不再接受兼容 token 或普通 API Key。
+
 ### 基础接口
 
 #### 健康检查
@@ -252,6 +292,25 @@ python -m uvicorn service.app:app --host 127.0.0.1 --port 8080
 ```bash
 curl http://127.0.0.1:8080/healthz
 ```
+
+示例响应：
+
+```json
+{
+  "status": "ok",
+  "ready": true,
+  "setup_completed": true,
+  "enabled_api_keys": 1,
+  "total_accounts": 2,
+  "healthy_accounts": 2,
+  "detail": null
+}
+```
+
+说明：
+
+- `status=ok` 且 `ready=true` 才表示服务真正可对外承接请求。
+- 如果后台未初始化、没有启用中的 API Key、或没有健康凭据，`/healthz` 会返回 `503` 和 `status=not_ready`。
 
 #### 获取 speaker 列表
 
@@ -261,8 +320,15 @@ curl http://127.0.0.1:8080/v1/speakers
 
 #### 获取音频二进制
 
+先在后台创建 API Key，再调用公开接口。调用时必须带：
+
+```text
+Authorization: Bearer <api-key>
+```
+
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/tts \
+  -H "Authorization: Bearer <api-key>" \
   -H "Content-Type: application/json" \
   -d '{"text":"你好，欢迎使用服务模式","speaker":"taozi","format":"aac","speed":0,"pitch":0}' \
   --output output.aac
@@ -272,26 +338,10 @@ curl -X POST http://127.0.0.1:8080/v1/tts \
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/tts/stream \
+  -H "Authorization: Bearer <api-key>" \
   -H "Content-Type: application/json" \
   -d '{"text":"这是一段用于流式输出的文本","speaker":"taozi","format":"aac"}' \
   --output stream_output.aac
-```
-
-#### 开启简单鉴权
-
-```powershell
-$env:TTS_AUTH_TOKEN = "change-me"
-python -m service
-```
-
-调用时带上 Bearer Token：
-
-```bash
-curl -X POST http://127.0.0.1:8080/v1/tts \
-  -H "Authorization: Bearer change-me" \
-  -H "Content-Type: application/json" \
-  -d '{"text":"鉴权测试","format":"aac"}' \
-  --output auth_output.aac
 ```
 
 #### 查看指标
@@ -300,7 +350,7 @@ curl -X POST http://127.0.0.1:8080/v1/tts \
 curl http://127.0.0.1:8080/metrics
 ```
 
-如果配置了 `TTS_AUTH_TOKEN`，`/metrics` 也需要携带 `Authorization: Bearer <token>`，否则返回 `401`；如果 `TTS_ENABLE_METRICS=false`，则返回 `503`。
+`/metrics` 现在只接受后台登录态；如果 `TTS_ENABLE_METRICS=false`，则返回 `503`。如果你要让 Prometheus 抓，应该在反向代理层做内网访问控制或单独加认证，不要再依赖服务内兼容 token。
 
 当前提供的指标包括：总请求数、成功数、失败数、超时数、上游失败数、未授权请求数、流式请求数、当前 in-flight 数。
 
@@ -321,6 +371,9 @@ WorkingDirectory=/opt/doubao-tts
 Environment="TTS_COOKIE=sessionid=...; sid_guard=...; uid_tt=..."
 Environment="TTS_HOST=0.0.0.0"
 Environment="TTS_PORT=8080"
+Environment="TTS_SQLITE_PATH=/var/lib/doubao-tts/tts_service.db"
+Environment="TTS_SESSION_SECRET=replace-with-a-long-random-secret"
+Environment="TTS_ADMIN_BOOTSTRAP_PASSWORD=bootstrap-only-password"
 ExecStart=/opt/doubao-tts/.venv/bin/python -m service
 Restart=always
 RestartSec=3
@@ -351,10 +404,18 @@ docker build -t doubao-tts:latest .
 docker run --rm -p 8080:8080 \
   -e TTS_COOKIE='sessionid=...; sid_guard=...; uid_tt=...' \
   -e TTS_HOST=0.0.0.0 \
+  -e TTS_SQLITE_PATH=/data/tts_service.db \
+  -e TTS_SESSION_SECRET='replace-with-a-long-random-secret' \
+  -e TTS_ADMIN_BOOTSTRAP_PASSWORD='bootstrap-only-password' \
+  -v doubao-tts-data:/data \
   doubao-tts:latest
 ```
 
-如果你要在反向代理后长期运行，再补 HTTPS、访问控制和进程级监控；不要把裸服务直接暴露到公网。
+如果你要在容器里长期运行：
+
+- 必须把 SQLite 文件挂到持久卷，不然后台配置、API Key、凭据池和报表都会跟容器一起丢。
+- 首次种子可以用 `TTS_COOKIE`，后续凭据维护走 `/admin/accounts`。
+- 不要把裸服务直接暴露到公网；至少加反向代理、HTTPS 和访问控制。
 
 ## 可用语音角色
 
