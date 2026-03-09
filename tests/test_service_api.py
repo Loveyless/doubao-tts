@@ -1,5 +1,6 @@
 import asyncio
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -42,8 +43,24 @@ class SlowTTSClient:
 
 
 class ServiceConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.sqlite_path = os.path.join(self.temp_dir.name, "service.sqlite3")
+        self.db_env_patcher = patch.dict(
+            os.environ,
+            {
+                "TTS_SQLITE_PATH": self.sqlite_path,
+                "TTS_SQLITE_JOURNAL_MODE": "DELETE",
+            },
+            clear=False,
+        )
+        self.db_env_patcher.start()
+        clear_service_config_cache()
+
     def tearDown(self):
         clear_service_config_cache()
+        self.db_env_patcher.stop()
+        self.temp_dir.cleanup()
 
     def test_service_config_reads_env(self):
         with patch.dict(
@@ -68,6 +85,34 @@ class ServiceConfigTests(unittest.TestCase):
         self.assertEqual(config.max_concurrency, 3)
         self.assertEqual(config.request_timeout_seconds, 12.5)
         self.assertEqual(config.auth_token, "secret-token")
+
+    def test_service_config_persists_defaults_in_sqlite(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TTS_DEFAULT_SPEAKER": "rap",
+                "TTS_DEFAULT_FORMAT": "mp3",
+            },
+            clear=False,
+        ):
+            clear_service_config_cache()
+            seeded_config = get_service_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                "TTS_DEFAULT_SPEAKER": "taozi",
+                "TTS_DEFAULT_FORMAT": "aac",
+            },
+            clear=False,
+        ):
+            clear_service_config_cache()
+            persisted_config = get_service_config()
+
+        self.assertEqual(seeded_config.default_speaker, "rap")
+        self.assertEqual(seeded_config.default_format, "mp3")
+        self.assertEqual(persisted_config.default_speaker, "rap")
+        self.assertEqual(persisted_config.default_format, "mp3")
 
 
 class ServiceDependencyTests(unittest.TestCase):
@@ -97,6 +142,19 @@ class ServiceDependencyTests(unittest.TestCase):
 
 class ServiceApiTests(unittest.TestCase):
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.sqlite_path = os.path.join(self.temp_dir.name, "service.sqlite3")
+        self.db_env_patcher = patch.dict(
+            os.environ,
+            {
+                "TTS_SQLITE_PATH": self.sqlite_path,
+                "TTS_SQLITE_JOURNAL_MODE": "DELETE",
+                "TTS_SESSION_SECRET": "test-session-secret",
+                "TTS_ADMIN_BOOTSTRAP_PASSWORD": "bootstrap-secret",
+            },
+            clear=False,
+        )
+        self.db_env_patcher.start()
         self.base_env = {
             "TTS_COOKIE": VALID_COOKIE,
             "TTS_ENABLE_METRICS": "true",
@@ -105,19 +163,88 @@ class ServiceApiTests(unittest.TestCase):
         self.env_patcher.start()
         clear_service_config_cache()
         self.client = TestClient(app)
+        self.api_key = self._create_api_key()
+        self.api_headers = {"Authorization": f"Bearer {self.api_key}"}
 
     def tearDown(self):
         self.client.close()
         self.env_patcher.stop()
+        self.db_env_patcher.stop()
         clear_service_config_cache()
+        self.temp_dir.cleanup()
 
-    def test_healthz_returns_ok(self):
+    def _get_csrf_cookie(self, path: str) -> str:
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        csrf_token = response.cookies.get("tts_admin_csrf") or self.client.cookies.get("tts_admin_csrf")
+        self.assertTrue(csrf_token)
+        return csrf_token
+
+    def _create_api_key(self) -> str:
+        csrf_token = self._get_csrf_cookie("/admin/setup")
+        setup_response = self.client.post(
+            "/admin/setup",
+            json={
+                "bootstrap_password": "bootstrap-secret",
+                "new_password": "correct horse battery staple",
+            },
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        self.assertEqual(setup_response.status_code, 200)
+
+        csrf_token = self.client.cookies.get("tts_admin_csrf")
+        self.assertTrue(csrf_token)
+        response = self.client.post(
+            "/admin/api-keys",
+            json={"name": "service-api-tests"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["raw_key"]
+
+    def _update_service_settings(self, **overrides) -> None:
+        csrf_token = self.client.cookies.get("tts_admin_csrf")
+        self.assertTrue(csrf_token)
+        payload = {
+            "default_speaker": "taozi",
+            "default_format": "aac",
+            "request_timeout_seconds": 35.0,
+            "max_concurrency": 4,
+            "retry_on_block": False,
+            "retry_max_retries": 0,
+            "retry_backoff_seconds": 1.0,
+            "retry_backoff_multiplier": 2.0,
+            "retry_backoff_jitter_ratio": 0.0,
+            "enable_streaming": True,
+            "allow_request_override": True,
+            "report_retention_days": 30,
+        }
+        payload.update(overrides)
+        response = self.client.post(
+            "/admin/settings",
+            json=payload,
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_healthz_returns_readiness_payload(self):
         response = self.client.get("/healthz")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        self.assertEqual(
+            response.json(),
+            {
+                "status": "ok",
+                "ready": True,
+                "setup_completed": True,
+                "enabled_api_keys": 1,
+                "total_accounts": 1,
+                "healthy_accounts": 1,
+                "detail": None,
+            },
+        )
 
-    def test_healthz_reports_missing_cookie(self):
+    def test_healthz_ignores_missing_env_cookie_after_account_seed(self):
         self.env_patcher.stop()
         previous_cookie = os.environ.pop("TTS_COOKIE", None)
         clear_service_config_cache()
@@ -129,8 +256,8 @@ class ServiceApiTests(unittest.TestCase):
             self.env_patcher.start()
             clear_service_config_cache()
 
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["error"], "service_unavailable")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ready"])
 
     def test_list_speakers_returns_mapping(self):
         response = self.client.get("/v1/speakers")
@@ -159,6 +286,7 @@ class ServiceApiTests(unittest.TestCase):
         response = self.client.post(
             "/v1/tts",
             json={"text": "测试文本", "speaker": "taozi", "format": "aac", "speed": 0, "pitch": 0},
+            headers=self.api_headers,
         )
 
         self.assertEqual(response.status_code, 200)
@@ -174,7 +302,11 @@ class ServiceApiTests(unittest.TestCase):
         result = TTSResult(success=False, error="block", error_code=710022002)
         build_tts_client_mock.return_value = FakeTTSClient(result=result)
 
-        response = self.client.post("/v1/tts", json={"text": "测试文本", "format": "aac"})
+        response = self.client.post(
+            "/v1/tts",
+            json={"text": "测试文本", "format": "aac"},
+            headers=self.api_headers,
+        )
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["error"], "bad_gateway")
@@ -184,27 +316,25 @@ class ServiceApiTests(unittest.TestCase):
         result = TTSResult(success=False, error="接收超时，音频可能不完整")
         build_tts_client_mock.return_value = FakeTTSClient(result=result)
 
-        response = self.client.post("/v1/tts", json={"text": "测试文本", "format": "aac"})
+        response = self.client.post(
+            "/v1/tts",
+            json={"text": "测试文本", "format": "aac"},
+            headers=self.api_headers,
+        )
 
         self.assertEqual(response.status_code, 504)
         self.assertEqual(response.json()["error"], "gateway_timeout")
 
     @patch("service.app.build_tts_client")
     def test_service_timeout_control_returns_504(self, build_tts_client_mock):
-        self.env_patcher.stop()
-        self.env_patcher = patch.dict(
-            os.environ,
-            {
-                **self.base_env,
-                "TTS_REQUEST_TIMEOUT_SECONDS": "0.01",
-            },
-            clear=False,
-        )
-        self.env_patcher.start()
-        clear_service_config_cache()
+        self._update_service_settings(request_timeout_seconds=0.01)
         build_tts_client_mock.return_value = SlowTTSClient()
 
-        response = self.client.post("/v1/tts", json={"text": "测试文本", "format": "aac"})
+        response = self.client.post(
+            "/v1/tts",
+            json={"text": "测试文本", "format": "aac"},
+            headers=self.api_headers,
+        )
 
         self.assertEqual(response.status_code, 504)
         self.assertEqual(response.json()["error"], "gateway_timeout")
@@ -214,7 +344,11 @@ class ServiceApiTests(unittest.TestCase):
         result = TTSResult(audio_data=b"stream-audio", attempt_count=1, success=True)
         build_tts_client_mock.return_value = FakeTTSClient(result=result)
 
-        response = self.client.post("/v1/tts/stream", json={"text": "测试文本", "format": "aac"})
+        response = self.client.post(
+            "/v1/tts/stream",
+            json={"text": "测试文本", "format": "aac"},
+            headers=self.api_headers,
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"stream-audio")
@@ -226,7 +360,7 @@ class ServiceApiTests(unittest.TestCase):
             result=TTSResult(audio_data=b"audio-bytes", attempt_count=1, success=True)
         )
 
-        self.client.post("/v1/tts", json={"text": "测试文本", "format": "aac"})
+        self.client.post("/v1/tts", json={"text": "测试文本", "format": "aac"}, headers=self.api_headers)
         response = self.client.get("/metrics")
 
         self.assertEqual(response.status_code, 200)
@@ -234,18 +368,7 @@ class ServiceApiTests(unittest.TestCase):
         self.assertIn("tts_request_success_total", response.text)
 
     @patch("service.app.build_tts_client")
-    def test_auth_guard_rejects_missing_token(self, build_tts_client_mock):
-        self.env_patcher.stop()
-        self.env_patcher = patch.dict(
-            os.environ,
-            {
-                **self.base_env,
-                "TTS_AUTH_TOKEN": "secret-token",
-            },
-            clear=False,
-        )
-        self.env_patcher.start()
-        clear_service_config_cache()
+    def test_public_api_rejects_missing_api_key(self, build_tts_client_mock):
         build_tts_client_mock.return_value = FakeTTSClient(
             result=TTSResult(audio_data=b"audio-bytes", attempt_count=1, success=True)
         )
@@ -256,18 +379,7 @@ class ServiceApiTests(unittest.TestCase):
         self.assertEqual(response.json()["error"], "unauthorized")
 
     @patch("service.app.build_tts_client")
-    def test_auth_guard_accepts_bearer_token(self, build_tts_client_mock):
-        self.env_patcher.stop()
-        self.env_patcher = patch.dict(
-            os.environ,
-            {
-                **self.base_env,
-                "TTS_AUTH_TOKEN": "secret-token",
-            },
-            clear=False,
-        )
-        self.env_patcher.start()
-        clear_service_config_cache()
+    def test_public_api_accepts_api_key(self, build_tts_client_mock):
         build_tts_client_mock.return_value = FakeTTSClient(
             result=TTSResult(audio_data=b"audio-bytes", attempt_count=1, success=True)
         )
@@ -275,8 +387,34 @@ class ServiceApiTests(unittest.TestCase):
         response = self.client.post(
             "/v1/tts",
             json={"text": "测试文本", "format": "aac"},
-            headers={"Authorization": "Bearer secret-token"},
+            headers=self.api_headers,
         )
 
         self.assertEqual(response.status_code, 200)
 
+    @patch("service.app.build_tts_client")
+    def test_public_api_rejects_explicit_zero_speed_and_pitch_when_override_disabled(self, build_tts_client_mock):
+        self._update_service_settings(allow_request_override=False)
+        build_tts_client_mock.return_value = FakeTTSClient(
+            result=TTSResult(audio_data=b"audio-bytes", attempt_count=1, success=True)
+        )
+
+        response = self.client.post(
+            "/v1/tts",
+            json={"text": "测试文本", "speed": 0, "pitch": 0},
+            headers=self.api_headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "Speed override is disabled")
+
+    def test_stream_requires_api_key_before_disclosing_disabled_state(self):
+        self._update_service_settings(enable_streaming=False)
+
+        response = self.client.post(
+            "/v1/tts/stream",
+            json={"text": "测试文本"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"], "unauthorized")

@@ -1,7 +1,15 @@
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
+
+from service.db import (
+    DatabaseError,
+    fetch_service_settings,
+    initialize_database,
+    save_initial_service_settings,
+    seed_initial_doubao_account,
+)
 
 VALID_AUDIO_FORMATS = {"aac", "mp3"}
 VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
@@ -61,6 +69,9 @@ class ServiceConfig:
     retry_backoff_jitter_ratio: float = 0.0
     request_timeout_seconds: float = 35.0
     max_concurrency: int = 4
+    enable_streaming: bool = True
+    allow_request_override: bool = True
+    report_retention_days: int = 30
     auth_token: str = ""
     metrics_enabled: bool = True
 
@@ -86,6 +97,48 @@ class ServiceConfig:
         config.validate()
         return config
 
+    @classmethod
+    def from_persisted_settings(
+        cls,
+        runtime_config: "ServiceConfig",
+        stored_settings: dict[str, object],
+    ) -> "ServiceConfig":
+        if not stored_settings:
+            return runtime_config
+
+        resolved = replace(
+            runtime_config,
+            default_speaker=str(stored_settings.get("default_speaker", runtime_config.default_speaker)),
+            default_format=str(stored_settings.get("default_format", runtime_config.default_format)),
+            retry_on_block=bool(stored_settings.get("retry_on_block", runtime_config.retry_on_block)),
+            retry_max_retries=int(stored_settings.get("retry_max_retries", runtime_config.retry_max_retries)),
+            retry_backoff_seconds=float(
+                stored_settings.get("retry_backoff_seconds", runtime_config.retry_backoff_seconds)
+            ),
+            retry_backoff_multiplier=float(
+                stored_settings.get("retry_backoff_multiplier", runtime_config.retry_backoff_multiplier)
+            ),
+            retry_backoff_jitter_ratio=float(
+                stored_settings.get(
+                    "retry_backoff_jitter_ratio",
+                    runtime_config.retry_backoff_jitter_ratio,
+                )
+            ),
+            request_timeout_seconds=float(
+                stored_settings.get("request_timeout_seconds", runtime_config.request_timeout_seconds)
+            ),
+            max_concurrency=int(stored_settings.get("max_concurrency", runtime_config.max_concurrency)),
+            enable_streaming=bool(stored_settings.get("enable_streaming", runtime_config.enable_streaming)),
+            allow_request_override=bool(
+                stored_settings.get("allow_request_override", runtime_config.allow_request_override)
+            ),
+            report_retention_days=int(
+                stored_settings.get("report_retention_days", runtime_config.report_retention_days)
+            ),
+        )
+        resolved.validate()
+        return resolved
+
     def validate(self) -> None:
         if self.default_format not in VALID_AUDIO_FORMATS:
             raise ConfigError(f"TTS_DEFAULT_FORMAT must be one of: {sorted(VALID_AUDIO_FORMATS)}")
@@ -105,6 +158,24 @@ class ServiceConfig:
             raise ConfigError("TTS_RETRY_BACKOFF_MULTIPLIER must be >= 1")
         if not 0 <= self.retry_backoff_jitter_ratio <= 1:
             raise ConfigError("TTS_RETRY_BACKOFF_JITTER_RATIO must be between 0 and 1")
+        if self.report_retention_days <= 0:
+            raise ConfigError("report_retention_days must be greater than 0")
+
+    def persistent_settings_payload(self) -> dict[str, object]:
+        return {
+            "default_speaker": self.default_speaker,
+            "default_format": self.default_format,
+            "retry_on_block": self.retry_on_block,
+            "retry_max_retries": self.retry_max_retries,
+            "retry_backoff_seconds": self.retry_backoff_seconds,
+            "retry_backoff_multiplier": self.retry_backoff_multiplier,
+            "retry_backoff_jitter_ratio": self.retry_backoff_jitter_ratio,
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "max_concurrency": self.max_concurrency,
+            "enable_streaming": self.enable_streaming,
+            "allow_request_override": self.allow_request_override,
+            "report_retention_days": self.report_retention_days,
+        }
 
 
 def configure_logging(log_level: str) -> None:
@@ -131,7 +202,18 @@ def configure_logging(log_level: str) -> None:
 
 @lru_cache(maxsize=1)
 def get_service_config() -> ServiceConfig:
-    config = ServiceConfig.from_env()
+    runtime_config = ServiceConfig.from_env()
+    try:
+        initialize_database(seed_service_settings=runtime_config.persistent_settings_payload())
+        seed_initial_doubao_account(runtime_config.cookie)
+        stored_settings = fetch_service_settings()
+        if not stored_settings:
+            save_initial_service_settings(runtime_config.persistent_settings_payload())
+            stored_settings = fetch_service_settings()
+    except DatabaseError as exc:
+        raise ConfigError(str(exc)) from exc
+
+    config = ServiceConfig.from_persisted_settings(runtime_config, stored_settings)
     configure_logging(config.log_level)
     return config
 

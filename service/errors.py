@@ -38,6 +38,11 @@ class UnauthorizedError(ServiceHTTPError):
         super().__init__(detail=detail, status_code=401, error="unauthorized")
 
 
+class ForbiddenError(ServiceHTTPError):
+    def __init__(self, detail: str = "Forbidden"):
+        super().__init__(detail=detail, status_code=403, error="forbidden")
+
+
 class UpstreamBadGatewayError(ServiceHTTPError):
     def __init__(self, detail: str):
         super().__init__(detail=detail, status_code=502, error="bad_gateway")
@@ -77,4 +82,3 @@ def map_tts_result_error(result: TTSResult) -> ServiceHTTPError:
         return UpstreamBadGatewayError(detail)
 
     return InternalServiceError(detail)
-
